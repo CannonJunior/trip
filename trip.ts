@@ -34,58 +34,131 @@ export function setDefaultOrigin(zip: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// URL verification (client-side tool handler)
+// ---------------------------------------------------------------------------
+
+// Patterns that indicate a redirect swallowed the specific booking link
+const ROOT_PATH_RE = /^\/?(index\.html?)?$/i;
+
+// Phrases that signal the page is a generic error, not a booking page
+const NOT_FOUND_PHRASES = [
+  'page not found',
+  '404 not found',
+  "doesn't exist",
+  'no results found',
+  "we couldn't find",
+  'no flights found',
+  'no availability',
+  'sorry, this page',
+];
+
+interface VerifyResult {
+  ok: boolean;
+  status: number;
+  final_url: string;
+  redirected_to_root: boolean;
+  not_found_on_page: boolean;
+  page_title: string;
+  error?: string;
+}
+
+async function verifyUrl(url: string): Promise<VerifyResult> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12_000);
+
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+      },
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    const body = await response.text();
+    const finalUrl = response.url;
+
+    // Detect redirect to homepage: same host, root-level path
+    let redirectedToRoot = false;
+    try {
+      const inputHost = new URL(url).hostname;
+      const finalParsed = new URL(finalUrl);
+      redirectedToRoot =
+        inputHost === finalParsed.hostname &&
+        ROOT_PATH_RE.test(finalParsed.pathname) &&
+        url !== finalUrl;
+    } catch { /* ignore parse errors */ }
+
+    const bodyLower = body.toLowerCase();
+    const notFoundOnPage = NOT_FOUND_PHRASES.some(p => bodyLower.includes(p));
+
+    const titleMatch = body.match(/<title[^>]*>([^<]+)<\/title>/i);
+    const pageTitle = titleMatch ? titleMatch[1].trim().slice(0, 120) : '(no title)';
+
+    const ok = response.ok && !redirectedToRoot && !notFoundOnPage;
+
+    return { ok, status: response.status, final_url: finalUrl, redirected_to_root: redirectedToRoot, not_found_on_page: notFoundOnPage, page_title: pageTitle };
+  } catch (err) {
+    return { ok: false, status: 0, final_url: url, redirected_to_root: false, not_found_on_page: false, page_title: '', error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // System prompt
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `You are a sharp travel planner writing a concise trip briefing covering flights, lodging, and a rental car.
+const SYSTEM_PROMPT = `You are a travel planner writing a verified trip briefing: flights, lodging, and a rental car.
 
-MANDATORY: You MUST use web_search to find real, current options before writing anything. NEVER fabricate prices, schedules, or availability. If results are sparse, say so — do not invent picks.
+You have two tools:
+  web_search  — find options, prices, and booking URLs from live search results
+  verify_url  — confirm a URL actually loads a valid booking page (not a 404, not a homepage redirect)
 
-CRITICAL INSTRUCTION: Begin your response immediately with "TRIP —" followed by the origin and destination on the very first line. Never ask the user for clarification — search immediately with the zip codes or city names given. Resolve zip codes to city names for all searches.
+WORKFLOW — follow this order strictly:
 
-VOICE AND STYLE
-- Specific and actionable — cite airline names, hotel names, car brands, exact prices found
-- Every price MUST be accompanied by a direct booking URL on the very next line. If you cannot find a direct URL for a price, omit that option entirely — do not include unlinked prices.
-- Plain text only — no markdown, no asterisks, no bullet symbols. Signal does not render markdown.
-- Use dashes (—) as separators within a line, blank lines between picks
-- Keep each pick under 80 words (excluding the URL line)
-- Best 2–3 options per category
+STEP 1 — SEARCH: Use web_search to find candidate options with prices and URLs for each category (flights, lodging, rental car). Collect the raw URL exactly as it appears in the search result — never construct or modify URLs.
 
-OUTPUT FORMAT — follow exactly:
+STEP 2 — VERIFY: Call verify_url on every candidate URL before including it in the output.
+  - If verify_url returns ok: false → DISCARD that option. Do not mention it.
+  - If verify_url returns ok: true → the option may be included.
+
+STEP 3 — WRITE: Format only the verified options. Every price must come verbatim from a search result snippet — never estimate or infer. If a category has zero verified options, write "No verified bookable options found for [category]." and continue.
+
+ABSOLUTE RULES:
+- Never fabricate a price, airline name, hotel name, URL, or availability.
+- Never construct a URL. Only use URLs that appeared in a search result and passed verify_url.
+- Never include an option that failed or skipped verify_url.
+- Plain text only — no markdown, no asterisks, no bullet symbols.
+- Use dashes (—) as separators within a line, blank lines between picks.
+
+OUTPUT FORMAT — begin your final response with this header, then the three sections:
 
 TRIP — [Origin City, ST] to [Destination City, ST] — [Travel Date or "flexible"]
 
 FLIGHTS
 
 [Airline or booking site name]
-[Route] — [Exact fare found] — [Nonstop or # of stops]
-[Key detail: departure window or deal note]
-Book: [direct URL to this fare or search result page]
-
-(repeat for 2–3 flight options)
+[Route] — [Exact fare from search] — [Nonstop or stops]
+[Departure window or deal note]
+Book: [verified URL]
 
 LODGING
 
 [Hotel name]
-[Neighborhood or distance from center] — [Exact nightly rate found]
+[Neighborhood] — [Exact nightly rate from search]
 [One sentence on why it's a good pick]
-Book: [direct URL to this property's booking page]
-
-(repeat for 2–3 lodging options)
+Book: [verified URL]
 
 RENTAL CAR
 
 [Company name]
-[Vehicle class] — [Exact daily rate found]
-[One sentence on pickup logistics or deal note]
-Book: [direct URL to this rental offer]
+[Vehicle class] — [Exact daily rate from search]
+[Pickup note]
+Book: [verified URL]
 
-(repeat for 2–3 rental options)
-
-RULES:
-- Every "Book:" line must be a real URL obtained from search results — never construct or guess a URL.
-- If a category yields no options with both a price AND a direct URL, write "No bookable options found for [category]." and move on.
-- Do not include any option that lacks a direct booking link.`;
+Best 2–3 options per category. Zip codes → resolve to city name before searching.`;
 
 // ---------------------------------------------------------------------------
 // Tools
@@ -95,7 +168,18 @@ const TOOLS: Anthropic.Messages.ToolUnion[] = [
   {
     type: 'web_search_20260209',
     name: 'web_search',
-    max_uses: 15,
+    max_uses: 18,
+  },
+  {
+    name: 'verify_url',
+    description: 'Fetch a URL and confirm it returns a valid booking page — not a 404, not a redirect to a site homepage. You MUST call this on every candidate booking URL before including it in the output. If ok is false, discard that option entirely.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        url: { type: 'string', description: 'The exact URL from the search result to verify.' },
+      },
+      required: ['url'],
+    },
   },
 ];
 
@@ -106,33 +190,28 @@ const TOOLS: Anthropic.Messages.ToolUnion[] = [
 function buildInitialPrompt(origin: string, destination: string, dateContext: string): string {
   return `Plan a trip from ${origin} to ${destination} around ${dateContext}.
 
-CRITICAL: For every price you include, you MUST record the direct booking URL from the search result. Only include an option if you have both a price AND a URL where the user can click through to complete the purchase or reservation. Never guess or construct URLs.
+Follow the three-step workflow from your instructions: search, then verify every URL, then write only the verified options.
 
-Use web_search to find real bookable options across three categories:
+Search targets for each category:
 
-1. FLIGHTS from ${origin} to ${destination} around ${dateContext}:
-   - "${origin} to ${destination} flights ${dateContext}"
-   - "${origin} to ${destination} cheap flights"
-   - "flights ${origin} ${destination} nonstop"
-   Target: Kayak, Google Flights, Expedia, or direct airline booking pages. Capture the exact fare and the URL from the search result.
+FLIGHTS from ${origin} to ${destination}:
+  web_search: "${origin} to ${destination} flights ${dateContext}"
+  web_search: "${origin} to ${destination} cheap flights nonstop"
+  web_search: "book flight ${origin} ${destination} ${dateContext} Kayak OR Expedia OR Google Flights"
 
-2. LODGING in ${destination} around ${dateContext}:
-   - "${destination} hotels ${dateContext}"
-   - "${destination} best hotels near downtown"
-   - "${destination} hotel deals ${dateContext}"
-   Target: Booking.com, Hotels.com, Marriott, Hilton, or other hotel brand booking pages. Capture the nightly rate and the URL.
+LODGING in ${destination}:
+  web_search: "${destination} hotels ${dateContext} book"
+  web_search: "${destination} hotel deals ${dateContext} Booking.com OR Hotels.com OR Marriott OR Hilton"
 
-3. RENTAL CAR at ${destination} around ${dateContext}:
-   - "${destination} airport car rental ${dateContext}"
-   - "cheapest car rental ${destination} ${dateContext}"
-   - "Enterprise Hertz Avis ${destination} car rental"
-   Target: Enterprise, Hertz, Avis, Budget, or Kayak Cars. Capture the daily rate and the URL.
+RENTAL CAR at ${destination}:
+  web_search: "${destination} airport car rental ${dateContext}"
+  web_search: "cheapest car rental ${destination} ${dateContext} Enterprise OR Hertz OR Avis OR Budget"
 
-Write the trip plan exactly per the format in your instructions. Every price must have a "Book:" line with the direct URL from search.`;
+After searching, call verify_url on every candidate URL. Discard any that fail. Then write the final trip plan.`;
 }
 
 const MAX_CONTINUATIONS = 3;
-const MAX_ITERATIONS = 20;
+const MAX_ITERATIONS = 40;
 
 export async function generateTrip(
   client: Anthropic,
@@ -176,14 +255,36 @@ export async function generateTrip(
     }
 
     if (response.stop_reason === 'tool_use') {
-      // web_search_20260209 is fully server-side: the API executes the search
-      // and returns results in response.content alongside ServerToolUseBlock.
       const clientToolUseBlocks = response.content.filter(
         (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use',
       );
-      if (clientToolUseBlocks.length > 0) {
-        return '(error: unexpected client-side tool_use with no handler)';
+
+      if (clientToolUseBlocks.length === 0) {
+        // Only server-side tool use (web_search); continue for next turn.
+        continue;
       }
+
+      // Execute client-side verify_url calls in parallel
+      const toolResults = await Promise.all(
+        clientToolUseBlocks.map(async (block) => {
+          if (block.name === 'verify_url') {
+            const input = block.input as { url: string };
+            const result = await verifyUrl(input.url);
+            return {
+              type: 'tool_result' as const,
+              tool_use_id: block.id,
+              content: JSON.stringify(result),
+            };
+          }
+          return {
+            type: 'tool_result' as const,
+            tool_use_id: block.id,
+            content: JSON.stringify({ error: `Unknown tool: ${block.name}` }),
+          };
+        }),
+      );
+
+      history.push({ role: 'user', content: toolResults });
       continue;
     }
 
@@ -198,5 +299,5 @@ export async function generateTrip(
   }
 
   const text = allTextParts.join('').trim();
-  return text || '(no trip options found)';
+  return text || '(no verified trip options found)';
 }

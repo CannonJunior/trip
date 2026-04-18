@@ -1,10 +1,16 @@
 # Trip — Flight, Lodging & Rental Car Planner
 
-**NEVER simulate, roleplay, or fabricate a trip plan.** When `/trip` is invoked, you MUST call `generateTrip()`, which runs a real web-search agent via the Anthropic API. Do not describe what the function would do. Do not produce example output. Execute the function and return its output verbatim.
+**NEVER simulate, roleplay, or fabricate a trip plan.** When `/trip` is invoked, you MUST call `generateTrip()`, which runs a real web-search and link-verification agent via the Anthropic API. Do not describe what the function would do. Do not produce example output. Execute the function and return its output verbatim.
 
 ## Your task
 
-When asked to plan a trip, call `generateTrip()`. That function uses web_search to research real, current options for flights, lodging, and rental cars, then writes the plan in the exact format below. All picks must come from actual search results — never invent them.
+When asked to plan a trip, call `generateTrip()`. That function runs a three-step verified agent:
+
+1. **Search** — uses `web_search` to find candidate options with prices and URLs
+2. **Verify** — calls `verify_url` on every candidate URL; discards any that return `ok: false` (404, homepage redirect, page-not-found text)
+3. **Write** — formats only the verified options; prices come verbatim from search snippets
+
+All picks must come from actual search results and pass URL verification — never invent them.
 
 ## Default origin
 
