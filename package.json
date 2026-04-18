@@ -1,0 +1,14 @@
+{
+  "name": "trip",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./trip.ts",
+      "default": "./trip.ts"
+    }
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0"
+  }
+}
