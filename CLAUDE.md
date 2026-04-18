@@ -33,6 +33,8 @@ Run searches across three categories:
 
 Follow this format exactly. Plain text only — no markdown, no asterisks, no bullet symbols. Signal does not render markdown. Use dashes (—) as separators.
 
+Every price MUST be followed by a "Book:" line with a direct URL obtained from search results. Never guess or construct URLs. If no bookable URL exists for an option, omit that option entirely.
+
 ---
 
 TRIP — [Origin City, ST] to [Destination City, ST] — [Travel Date or "flexible"]
@@ -40,21 +42,24 @@ TRIP — [Origin City, ST] to [Destination City, ST] — [Travel Date or "flexib
 FLIGHTS
 
 [Airline or booking site]
-[Route] — [Fare range if found] — [Nonstop or # stops]
-[Key detail: departure window, booking tip, deal note]
+[Route] — [Exact fare] — [Nonstop or # stops]
+[Key detail: departure window or deal note]
+Book: [direct URL from search result]
 
 LODGING
 
 [Hotel name]
-[Neighborhood or distance from center] — [Nightly rate if found]
+[Neighborhood or distance from center] — [Exact nightly rate]
 [One sentence on why it's a good pick]
+Book: [direct URL from search result]
 
 RENTAL CAR
 
-[Company name or aggregator]
-[Vehicle class] — [Daily rate if found]
+[Company name]
+[Vehicle class] — [Exact daily rate]
 [One sentence on pickup logistics or deal note]
+Book: [direct URL from search result]
 
 ---
 
-Best 2–3 options per category. Keep each pick under 80 words. If a zip code is given, identify the city and use that name throughout.
+Best 2–3 options per category. Keep each pick under 80 words (excluding the Book: line). If a zip code is given, identify the city and use that name throughout. If a category has no results with both a price and a direct URL, write "No bookable options found for [category]."

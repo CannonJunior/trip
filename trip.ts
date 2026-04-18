@@ -44,10 +44,11 @@ MANDATORY: You MUST use web_search to find real, current options before writing 
 CRITICAL INSTRUCTION: Begin your response immediately with "TRIP —" followed by the origin and destination on the very first line. Never ask the user for clarification — search immediately with the zip codes or city names given. Resolve zip codes to city names for all searches.
 
 VOICE AND STYLE
-- Specific and actionable — cite airline names, hotel names, car brands, prices where found
+- Specific and actionable — cite airline names, hotel names, car brands, exact prices found
+- Every price MUST be accompanied by a direct booking URL on the very next line. If you cannot find a direct URL for a price, omit that option entirely — do not include unlinked prices.
 - Plain text only — no markdown, no asterisks, no bullet symbols. Signal does not render markdown.
 - Use dashes (—) as separators within a line, blank lines between picks
-- Keep each pick under 80 words
+- Keep each pick under 80 words (excluding the URL line)
 - Best 2–3 options per category
 
 OUTPUT FORMAT — follow exactly:
@@ -57,28 +58,34 @@ TRIP — [Origin City, ST] to [Destination City, ST] — [Travel Date or "flexib
 FLIGHTS
 
 [Airline or booking site name]
-[Route] — [Approximate fare range if found] — [Nonstop or # of stops]
-[Key detail: departure window, booking tip, or deal note]
+[Route] — [Exact fare found] — [Nonstop or # of stops]
+[Key detail: departure window or deal note]
+Book: [direct URL to this fare or search result page]
 
 (repeat for 2–3 flight options)
 
 LODGING
 
-[Hotel or accommodation name]
-[Neighborhood or distance from center] — [Approximate nightly rate if found]
-[One sentence on why it's a good pick for this trip]
+[Hotel name]
+[Neighborhood or distance from center] — [Exact nightly rate found]
+[One sentence on why it's a good pick]
+Book: [direct URL to this property's booking page]
 
 (repeat for 2–3 lodging options)
 
 RENTAL CAR
 
-[Company name or aggregator]
-[Vehicle class] — [Approximate daily rate if found]
+[Company name]
+[Vehicle class] — [Exact daily rate found]
 [One sentence on pickup logistics or deal note]
+Book: [direct URL to this rental offer]
 
 (repeat for 2–3 rental options)
 
-DO NOT include options that appear unavailable or are clearly not relevant to the route. Prioritize options with clear pricing or booking paths.`;
+RULES:
+- Every "Book:" line must be a real URL obtained from search results — never construct or guess a URL.
+- If a category yields no options with both a price AND a direct URL, write "No bookable options found for [category]." and move on.
+- Do not include any option that lacks a direct booking link.`;
 
 // ---------------------------------------------------------------------------
 // Tools
@@ -99,27 +106,29 @@ const TOOLS: Anthropic.Messages.ToolUnion[] = [
 function buildInitialPrompt(origin: string, destination: string, dateContext: string): string {
   return `Plan a trip from ${origin} to ${destination} around ${dateContext}.
 
-Use web_search to find real options across three categories:
+CRITICAL: For every price you include, you MUST record the direct booking URL from the search result. Only include an option if you have both a price AND a URL where the user can click through to complete the purchase or reservation. Never guess or construct URLs.
+
+Use web_search to find real bookable options across three categories:
 
 1. FLIGHTS from ${origin} to ${destination} around ${dateContext}:
    - "${origin} to ${destination} flights ${dateContext}"
    - "${origin} to ${destination} cheap flights"
    - "flights ${origin} ${destination} nonstop"
-   Search Google Flights, Kayak, Expedia, or airline sites for real fares.
+   Target: Kayak, Google Flights, Expedia, or direct airline booking pages. Capture the exact fare and the URL from the search result.
 
 2. LODGING in ${destination} around ${dateContext}:
    - "${destination} hotels ${dateContext}"
    - "${destination} best hotels near downtown"
    - "${destination} hotel deals ${dateContext}"
-   Search Hotels.com, Booking.com, or hotel brand sites for rates.
+   Target: Booking.com, Hotels.com, Marriott, Hilton, or other hotel brand booking pages. Capture the nightly rate and the URL.
 
 3. RENTAL CAR at ${destination} around ${dateContext}:
-   - "${destination} car rental ${dateContext}"
-   - "${destination} airport car rental rates"
+   - "${destination} airport car rental ${dateContext}"
    - "cheapest car rental ${destination} ${dateContext}"
-   Search Kayak, Enterprise, Hertz, or aggregators for daily rates.
+   - "Enterprise Hertz Avis ${destination} car rental"
+   Target: Enterprise, Hertz, Avis, Budget, or Kayak Cars. Capture the daily rate and the URL.
 
-Write the trip plan exactly per the format in your instructions.`;
+Write the trip plan exactly per the format in your instructions. Every price must have a "Book:" line with the direct URL from search.`;
 }
 
 const MAX_CONTINUATIONS = 3;
