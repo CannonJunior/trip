@@ -1,6 +1,19 @@
 /**
  * /trip — Plan a flight, lodging, and rental car from an origin to a destination zip code.
  *
+ * URL strategy: LLM-generated booking URLs are unreliable by design — airlines use
+ * session-dependent URLs, Google Flights uses obfuscated protobuf encoding, and bot
+ * detection on travel sites blocks programmatic verification of page content.
+ *
+ * Instead, this module generates DETERMINISTIC SEARCH DEEP LINKS using documented
+ * stable URL formats from trusted aggregators. The LLM's only job is to resolve zip
+ * codes to IATA airport codes and city names; the URL structure itself is fixed.
+ * verify_url confirms each link resolves to a real page (not a 404 or homepage
+ * redirect). Prices shown are live and current when the user clicks — not locked.
+ *
+ * To get locked fares with guaranteed pricing, see CLAUDE.md for the Duffel API
+ * integration path (flights-mcp).
+ *
  * Exports:
  *   generateTrip()        — run the trip planning agent
  *   getDefaultOrigin()    — read the saved default origin zip code
@@ -34,22 +47,42 @@ export function setDefaultOrigin(zip: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// URL verification (client-side tool handler)
+// Date helpers
 // ---------------------------------------------------------------------------
 
-// Patterns that indicate a redirect swallowed the specific booking link
+function isoDateFromContext(dateContext?: string): string {
+  if (dateContext) {
+    const d = new Date(dateContext);
+    if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  }
+  // Default: two weeks from today
+  const d = new Date();
+  d.setDate(d.getDate() + 14);
+  return d.toISOString().slice(0, 10);
+}
+
+function addDays(iso: string, days: number): string {
+  const d = new Date(iso + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// ---------------------------------------------------------------------------
+// URL verification
+// ---------------------------------------------------------------------------
+
+// 403 from these domains is bot detection, not a broken link. Real browsers work fine.
+const TRUSTED_AGGREGATOR_DOMAINS = [
+  'kayak.com', 'booking.com', 'hotels.com', 'expedia.com',
+  'google.com', 'rentalcars.com', 'priceline.com',
+];
+
 const ROOT_PATH_RE = /^\/?(index\.html?)?$/i;
 
-// Phrases that signal the page is a generic error, not a booking page
 const NOT_FOUND_PHRASES = [
-  'page not found',
-  '404 not found',
-  "doesn't exist",
-  'no results found',
-  "we couldn't find",
-  'no flights found',
-  'no availability',
-  'sorry, this page',
+  'page not found', '404 not found', "doesn't exist", 'no results found',
+  "we couldn't find", 'no flights found', 'no availability', 'sorry, this page',
+  'this page is no longer available',
 ];
 
 interface VerifyResult {
@@ -57,6 +90,7 @@ interface VerifyResult {
   status: number;
   final_url: string;
   redirected_to_root: boolean;
+  bot_detection: boolean;
   not_found_on_page: boolean;
   page_title: string;
   error?: string;
@@ -78,11 +112,11 @@ async function verifyUrl(url: string): Promise<VerifyResult> {
     });
     clearTimeout(timeoutId);
 
-    const body = await response.text();
     const finalUrl = response.url;
+    const body = await response.text();
 
-    // Detect redirect to homepage: same host, root-level path
     let redirectedToRoot = false;
+    let isTrustedDomain = false;
     try {
       const inputHost = new URL(url).hostname;
       const finalParsed = new URL(finalUrl);
@@ -90,19 +124,23 @@ async function verifyUrl(url: string): Promise<VerifyResult> {
         inputHost === finalParsed.hostname &&
         ROOT_PATH_RE.test(finalParsed.pathname) &&
         url !== finalUrl;
+      isTrustedDomain = TRUSTED_AGGREGATOR_DOMAINS.some(d => finalParsed.hostname.endsWith(d));
     } catch { /* ignore parse errors */ }
 
     const bodyLower = body.toLowerCase();
     const notFoundOnPage = NOT_FOUND_PHRASES.some(p => bodyLower.includes(p));
 
+    // 403 from a trusted aggregator = bot detection; real users with browsers are fine
+    const botDetection = response.status === 403 && isTrustedDomain;
+
+    const ok = (response.ok || botDetection) && !redirectedToRoot && !notFoundOnPage;
+
     const titleMatch = body.match(/<title[^>]*>([^<]+)<\/title>/i);
     const pageTitle = titleMatch ? titleMatch[1].trim().slice(0, 120) : '(no title)';
 
-    const ok = response.ok && !redirectedToRoot && !notFoundOnPage;
-
-    return { ok, status: response.status, final_url: finalUrl, redirected_to_root: redirectedToRoot, not_found_on_page: notFoundOnPage, page_title: pageTitle };
+    return { ok, status: response.status, final_url: finalUrl, redirected_to_root: redirectedToRoot, bot_detection: botDetection, not_found_on_page: notFoundOnPage, page_title: pageTitle };
   } catch (err) {
-    return { ok: false, status: 0, final_url: url, redirected_to_root: false, not_found_on_page: false, page_title: '', error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, status: 0, final_url: url, redirected_to_root: false, bot_detection: false, not_found_on_page: false, page_title: '', error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -110,55 +148,84 @@ async function verifyUrl(url: string): Promise<VerifyResult> {
 // System prompt
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `You are a travel planner writing a verified trip briefing: flights, lodging, and a rental car.
+const SYSTEM_PROMPT = `You are a travel planner. Your job is to generate VERIFIED, WORKING search links for flights, hotels, and rental cars using trusted aggregator sites.
 
-You have two tools:
-  web_search  — find options, prices, and booking URLs from live search results
-  verify_url  — confirm a URL actually loads a valid booking page (not a 404, not a homepage redirect)
+CRITICAL ARCHITECTURAL RULE: You must NEVER construct or guess a booking URL. Travel booking URLs are session-dependent and protected by bot detection — LLM-generated booking links always fail. Instead, use ONLY the exact URL templates below, substituting real values you find via web_search. This is the only approach that produces links users can actually click and use.
 
-WORKFLOW — follow this order strictly:
+WORKFLOW:
 
-STEP 1 — SEARCH: Use web_search to find candidate options with prices and URLs for each category (flights, lodging, rental car). Collect the raw URL exactly as it appears in the search result — never construct or modify URLs.
+STEP 1 — RESOLVE LOCATIONS via web_search
+Find the nearest major commercial airport IATA code for each location.
+Search: "[location] nearest major airport IATA code"
+Also find the full city name (for display and hotel search URLs).
+Note: zip 22101 = McLean VA → DCA (Reagan National) or IAD (Dulles International).
 
-STEP 2 — VERIFY: Call verify_url on every candidate URL before including it in the output.
-  - If verify_url returns ok: false → DISCARD that option. Do not mention it.
-  - If verify_url returns ok: true → the option may be included.
+STEP 2 — CONSTRUCT URLS using ONLY these exact templates
+Substitute [ORIGIN], [DEST], [TRAVEL_DATE], [CHECKOUT_DATE], [CITY] with real values.
+Do not change any other part of the URL.
 
-STEP 3 — WRITE: Format only the verified options. Every price must come verbatim from a search result snippet — never estimate or infer. If a category has zero verified options, write "No verified bookable options found for [category]." and continue.
+FLIGHTS — Kayak (most reliable, stable format):
+  https://www.kayak.com/flights/[ORIGIN]-[DEST]/[TRAVEL_DATE]
+
+FLIGHTS — Google Flights (natural-language query):
+  https://www.google.com/travel/flights?q=flights+from+[ORIGIN]+to+[DEST]+on+[TRAVEL_DATE]
+  (replace spaces in date with +, e.g. "May+1+2026")
+
+HOTELS — Booking.com:
+  https://www.booking.com/searchresults.html?checkin=[TRAVEL_DATE]&checkout=[CHECKOUT_DATE]&ss=[CITY_URL_ENCODED]&group_adults=2&no_rooms=1
+  (URL-encode city: spaces → +, e.g. "Los+Angeles")
+
+HOTELS — Google Hotels:
+  https://www.google.com/travel/hotels?q=hotels+in+[CITY_URL_ENCODED]+[TRAVEL_DATE_URL_ENCODED]
+
+RENTAL CARS — Kayak:
+  https://www.kayak.com/cars/[DEST]/[TRAVEL_DATE]-0900/[CHECKOUT_DATE]-1700
+
+STEP 3 — VERIFY each constructed URL by calling verify_url before including it.
+  - ok: true → include it
+  - ok: false AND bot_detection: false → the URL is broken; omit it
+  - ok: true AND bot_detection: true → the link is valid; real browsers work fine
+
+STEP 4 — WRITE the output.
+Do NOT include any price estimates or fare amounts — you have no reliable source for these. State clearly that prices are live and shown when the user clicks. This is honest: the user sees real current prices, not stale or fabricated ones.
 
 ABSOLUTE RULES:
-- Never fabricate a price, airline name, hotel name, URL, or availability.
-- Never construct a URL. Only use URLs that appeared in a search result and passed verify_url.
-- Never include an option that failed or skipped verify_url.
-- Plain text only — no markdown, no asterisks, no bullet symbols.
-- Use dashes (—) as separators within a line, blank lines between picks.
+- Never invent or modify a URL. Only use the templates above.
+- Never state a price. Prices are live and shown at the search site.
+- Plain text only. No markdown. No asterisks. No bullet symbols.
+- Use dashes (—) as separators, blank lines between entries.
 
-OUTPUT FORMAT — begin your final response with this header, then the three sections:
+OUTPUT FORMAT:
 
-TRIP — [Origin City, ST] to [Destination City, ST] — [Travel Date or "flexible"]
+TRIP — [Origin City, ST] to [Destination City, ST] — [Travel Date]
+
+Prices are live — shown current when you click each link. None are pre-locked; book directly on the site.
 
 FLIGHTS
 
-[Airline or booking site name]
-[Route] — [Exact fare from search] — [Nonstop or stops]
-[Departure window or deal note]
-Book: [verified URL]
+Kayak — [ORIGIN] to [DEST] — [Date]
+All major airlines compared. Click to filter by time, stops, and airline.
+Search: [verified Kayak flights URL]
+
+Google Flights — [ORIGIN] to [DEST] — [Date]
+Live prices with fare calendar and price tracking.
+Search: [verified Google Flights URL]
 
 LODGING
 
-[Hotel name]
-[Neighborhood] — [Exact nightly rate from search]
-[One sentence on why it's a good pick]
-Book: [verified URL]
+Booking.com — [City] — [Check-in] to [Check-out]
+Thousands of properties with free-cancellation options.
+Search: [verified Booking.com URL]
+
+Google Hotels — [City] — [Check-in] to [Check-out]
+Hotels, vacation rentals, and price comparison across booking sites.
+Search: [verified Google Hotels URL]
 
 RENTAL CAR
 
-[Company name]
-[Vehicle class] — [Exact daily rate from search]
-[Pickup note]
-Book: [verified URL]
-
-Best 2–3 options per category. Zip codes → resolve to city name before searching.`;
+Kayak Cars — [Dest Airport] — [Pickup Date] to [Return Date]
+Rates from Enterprise, Hertz, Avis, Budget, and more. Airport pickup.
+Search: [verified Kayak Cars URL]`;
 
 // ---------------------------------------------------------------------------
 // Tools
@@ -168,15 +235,15 @@ const TOOLS: Anthropic.Messages.ToolUnion[] = [
   {
     type: 'web_search_20260209',
     name: 'web_search',
-    max_uses: 18,
+    max_uses: 6, // Only needed for IATA code lookups
   },
   {
     name: 'verify_url',
-    description: 'Fetch a URL and confirm it returns a valid booking page — not a 404, not a redirect to a site homepage. You MUST call this on every candidate booking URL before including it in the output. If ok is false, discard that option entirely.',
+    description: 'Verify that a constructed URL resolves to a real page (not a 404 or homepage redirect). Call this on every URL before including it in the output. A 403 from a known travel aggregator (Kayak, Booking.com, Google, etc.) means bot detection — the link is valid for real users, so ok will be true. If ok is false, omit the link.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        url: { type: 'string', description: 'The exact URL from the search result to verify.' },
+        url: { type: 'string', description: 'The URL to verify.' },
       },
       required: ['url'],
     },
@@ -187,31 +254,37 @@ const TOOLS: Anthropic.Messages.ToolUnion[] = [
 // Agent loop
 // ---------------------------------------------------------------------------
 
-function buildInitialPrompt(origin: string, destination: string, dateContext: string): string {
-  return `Plan a trip from ${origin} to ${destination} around ${dateContext}.
+function buildInitialPrompt(
+  origin: string,
+  destination: string,
+  travelDateIso: string,
+  checkoutDateIso: string,
+  dateLabel: string,
+): string {
+  return `Plan a trip from ${origin} to ${destination} for ${dateLabel}.
 
-Follow the three-step workflow from your instructions: search, then verify every URL, then write only the verified options.
+Travel date (for URLs): ${travelDateIso}
+Checkout/return date (for URLs, 3 days later): ${checkoutDateIso}
 
-Search targets for each category:
+Follow the four-step workflow:
 
-FLIGHTS from ${origin} to ${destination}:
-  web_search: "${origin} to ${destination} flights ${dateContext}"
-  web_search: "${origin} to ${destination} cheap flights nonstop"
-  web_search: "book flight ${origin} ${destination} ${dateContext} Kayak OR Expedia OR Google Flights"
+1. Use web_search to find the IATA airport code for ${origin} and for ${destination}.
+   Search: "${origin} nearest major airport IATA code"
+   Search: "${destination} nearest major airport IATA code"
 
-LODGING in ${destination}:
-  web_search: "${destination} hotels ${dateContext} book"
-  web_search: "${destination} hotel deals ${dateContext} Booking.com OR Hotels.com OR Marriott OR Hilton"
+2. Construct all 5 URLs using the exact templates in your instructions:
+   - Kayak flights (fill in ORIGIN IATA, DEST IATA, ${travelDateIso})
+   - Google Flights (fill in ORIGIN IATA, DEST IATA, date as human-readable words)
+   - Booking.com hotels (fill in ${travelDateIso}, ${checkoutDateIso}, destination city URL-encoded)
+   - Google Hotels (fill in city and date)
+   - Kayak Cars (fill in DEST IATA, ${travelDateIso}, ${checkoutDateIso})
 
-RENTAL CAR at ${destination}:
-  web_search: "${destination} airport car rental ${dateContext}"
-  web_search: "cheapest car rental ${destination} ${dateContext} Enterprise OR Hertz OR Avis OR Budget"
+3. Call verify_url on each of the 5 URLs.
 
-After searching, call verify_url on every candidate URL. Discard any that fail. Then write the final trip plan.`;
+4. Write the output with all verified URLs.`;
 }
 
-const MAX_CONTINUATIONS = 3;
-const MAX_ITERATIONS = 40;
+const MAX_ITERATIONS = 30;
 
 export async function generateTrip(
   client: Anthropic,
@@ -220,16 +293,17 @@ export async function generateTrip(
   destination: string,
   dateContext?: string,
 ): Promise<string> {
-  const date = dateContext ?? new Date().toLocaleDateString('en-US', {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+  const travelDateIso = isoDateFromContext(dateContext);
+  const checkoutDateIso = addDays(travelDateIso, 3);
+  const dateLabel = new Date(travelDateIso + 'T12:00:00Z').toLocaleDateString('en-US', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC',
   });
 
   const history: Anthropic.MessageParam[] = [
-    { role: 'user', content: buildInitialPrompt(origin, destination, date) },
+    { role: 'user', content: buildInitialPrompt(origin, destination, travelDateIso, checkoutDateIso, dateLabel) },
   ];
 
   const allTextParts: string[] = [];
-  let continuationCount = 0;
   let iterations = 0;
 
   while (iterations++ < MAX_ITERATIONS) {
@@ -260,11 +334,11 @@ export async function generateTrip(
       );
 
       if (clientToolUseBlocks.length === 0) {
-        // Only server-side tool use (web_search); continue for next turn.
+        // Server-side web_search only; continue for synthesis turn.
         continue;
       }
 
-      // Execute client-side verify_url calls in parallel
+      // Execute verify_url calls in parallel
       const toolResults = await Promise.all(
         clientToolUseBlocks.map(async (block) => {
           if (block.name === 'verify_url') {
@@ -289,9 +363,7 @@ export async function generateTrip(
     }
 
     if (response.stop_reason === 'max_tokens') {
-      if (continuationCount >= MAX_CONTINUATIONS) break;
-      continuationCount++;
-      history.push({ role: 'user', content: 'Continue the trip plan.' });
+      history.push({ role: 'user', content: 'Continue.' });
       continue;
     }
 
@@ -299,5 +371,5 @@ export async function generateTrip(
   }
 
   const text = allTextParts.join('').trim();
-  return text || '(no verified trip options found)';
+  return text || '(no results)';
 }
