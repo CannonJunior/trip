@@ -164,12 +164,12 @@ STEP 2 — CONSTRUCT URLS using ONLY these exact templates
 Substitute [ORIGIN], [DEST], [TRAVEL_DATE], [CHECKOUT_DATE], [CITY] with real values.
 Do not change any other part of the URL.
 
-FLIGHTS — Kayak (most reliable, stable format):
-  https://www.kayak.com/flights/[ORIGIN]-[DEST]/[TRAVEL_DATE]
+FLIGHTS — Kayak round-trip (most reliable, stable format):
+  https://www.kayak.com/flights/[ORIGIN]-[DEST]/[TRAVEL_DATE]/[RETURN_DATE]
 
-FLIGHTS — Google Flights (natural-language query):
-  https://www.google.com/travel/flights?q=flights+from+[ORIGIN]+to+[DEST]+on+[TRAVEL_DATE]
-  (replace spaces in date with +, e.g. "May+1+2026")
+FLIGHTS — Google Flights round-trip (natural-language query):
+  https://www.google.com/travel/flights?q=round+trip+flights+from+[ORIGIN]+to+[DEST]+departing+[TRAVEL_DATE_WORDS]+returning+[RETURN_DATE_WORDS]
+  (replace spaces with +, e.g. "May+1+2026")
 
 HOTELS — Booking.com:
   https://www.booking.com/searchresults.html?checkin=[TRAVEL_DATE]&checkout=[CHECKOUT_DATE]&ss=[CITY_URL_ENCODED]&group_adults=2&no_rooms=1
@@ -186,45 +186,51 @@ STEP 3 — VERIFY each constructed URL by calling verify_url before including it
   - ok: false AND bot_detection: false → the URL is broken; omit it
   - ok: true AND bot_detection: true → the link is valid; real browsers work fine
 
-STEP 4 — WRITE the output.
-Do NOT include any price estimates or fare amounts — you have no reliable source for these. State clearly that prices are live and shown when the user clicks. This is honest: the user sees real current prices, not stale or fabricated ones.
+STEP 3.5 — SEARCH FOR PRICE ESTIMATES via web_search
+After verifying URLs, search for current approximate prices to give the user a ballpark:
+  - "round trip flights [ORIGIN] to [DEST] [TRAVEL_DATE] price"
+  - "hotels [DEST CITY] [TRAVEL_DATE] price per night"
+  - "car rental [DEST CITY] [TRAVEL_DATE] price per day"
+Only quote prices that appear verbatim in search result snippets. If a snippet says "from $189", write "from ~$189". Label every price as an estimate with "~". If no price appears in any snippet, omit it for that category — do not infer or guess.
+
+STEP 4 — WRITE the output with verified URLs and any estimates found.
 
 ABSOLUTE RULES:
 - Never invent or modify a URL. Only use the templates above.
-- Never state a price. Prices are live and shown at the search site.
+- Never fabricate a price. Only cite prices that appeared verbatim in a search snippet, labeled with ~.
 - Plain text only. No markdown. No asterisks. No bullet symbols.
 - Use dashes (—) as separators, blank lines between entries.
 
 OUTPUT FORMAT:
 
-TRIP — [Origin City, ST] to [Destination City, ST] — [Travel Date]
+TRIP — [Origin City, ST] to [Destination City, ST] — [Depart Date] / Return [Return Date]
 
-Prices are live — shown current when you click each link. None are pre-locked; book directly on the site.
+Estimates (~) are from recent search results and are not locked. Click any link to see live prices and book.
 
-FLIGHTS
+FLIGHTS (round trip)
 
-Kayak — [ORIGIN] to [DEST] — [Date]
-All major airlines compared. Click to filter by time, stops, and airline.
-Search: [verified Kayak flights URL]
+Kayak — [ORIGIN] to [DEST], depart [Date] return [Return Date]
+[~$NNN round trip if found in search, otherwise omit] — All major airlines compared.
+Search: [verified Kayak round-trip URL]
 
-Google Flights — [ORIGIN] to [DEST] — [Date]
-Live prices with fare calendar and price tracking.
-Search: [verified Google Flights URL]
+Google Flights — [ORIGIN] to [DEST], depart [Date] return [Return Date]
+[~$NNN round trip if found in search, otherwise omit] — Fare calendar and price alerts available.
+Search: [verified Google Flights round-trip URL]
 
 LODGING
 
 Booking.com — [City] — [Check-in] to [Check-out]
-Thousands of properties with free-cancellation options.
+[~$NNN/night if found in search, otherwise omit] — Free cancellation options available.
 Search: [verified Booking.com URL]
 
 Google Hotels — [City] — [Check-in] to [Check-out]
-Hotels, vacation rentals, and price comparison across booking sites.
+[~$NNN/night if found in search, otherwise omit] — Compares rates across booking sites.
 Search: [verified Google Hotels URL]
 
 RENTAL CAR
 
-Kayak Cars — [Dest Airport] — [Pickup Date] to [Return Date]
-Rates from Enterprise, Hertz, Avis, Budget, and more. Airport pickup.
+Kayak Cars — [Dest City] — [Pickup Date] to [Return Date]
+[~$NNN/day if found in search, otherwise omit] — Enterprise, Hertz, Avis, Budget and more. Airport pickup.
 Search: [verified Kayak Cars URL]`;
 
 // ---------------------------------------------------------------------------
@@ -235,7 +241,7 @@ const TOOLS: Anthropic.Messages.ToolUnion[] = [
   {
     type: 'web_search_20260209',
     name: 'web_search',
-    max_uses: 6, // Only needed for IATA code lookups
+    max_uses: 12, // IATA lookups + price estimate searches
   },
   {
     name: 'verify_url',
@@ -261,27 +267,32 @@ function buildInitialPrompt(
   checkoutDateIso: string,
   dateLabel: string,
 ): string {
-  return `Plan a trip from ${origin} to ${destination} for ${dateLabel}.
+  return `Plan a round-trip from ${origin} to ${destination}, departing ${dateLabel}.
 
-Travel date (for URLs): ${travelDateIso}
-Checkout/return date (for URLs, 3 days later): ${checkoutDateIso}
+Depart date (ISO, for URLs): ${travelDateIso}
+Return date (ISO, 3 days later, for URLs): ${checkoutDateIso}
 
-Follow the four-step workflow:
+Follow the workflow from your instructions:
 
-1. Use web_search to find the IATA airport code for ${origin} and for ${destination}.
-   Search: "${origin} nearest major airport IATA code"
-   Search: "${destination} nearest major airport IATA code"
+STEP 1 — IATA lookups (web_search):
+  "${origin} nearest major airport IATA code"
+  "${destination} nearest major airport IATA code"
 
-2. Construct all 5 URLs using the exact templates in your instructions:
-   - Kayak flights (fill in ORIGIN IATA, DEST IATA, ${travelDateIso})
-   - Google Flights (fill in ORIGIN IATA, DEST IATA, date as human-readable words)
-   - Booking.com hotels (fill in ${travelDateIso}, ${checkoutDateIso}, destination city URL-encoded)
-   - Google Hotels (fill in city and date)
-   - Kayak Cars (fill in DEST IATA, ${travelDateIso}, ${checkoutDateIso})
+STEP 2 — Construct these 5 URLs from the templates (round-trip for flights):
+  - Kayak flights:   ORIGIN=${travelDateIso} DEST, depart ${travelDateIso}, return ${checkoutDateIso}
+  - Google Flights:  round trip, depart ${travelDateIso}, return ${checkoutDateIso}
+  - Booking.com:     checkin ${travelDateIso}, checkout ${checkoutDateIso}, destination city
+  - Google Hotels:   destination city, ${travelDateIso}
+  - Kayak Cars:      DEST IATA, pickup ${travelDateIso}-0900, return ${checkoutDateIso}-1700
 
-3. Call verify_url on each of the 5 URLs.
+STEP 3 — verify_url on all 5 URLs.
 
-4. Write the output with all verified URLs.`;
+STEP 3.5 — Price estimate searches (web_search):
+  "round trip flights ${origin} to ${destination} ${travelDateIso} price"
+  "hotels ${destination} ${travelDateIso} price per night"
+  "car rental ${destination} ${travelDateIso} price per day"
+
+STEP 4 — Write the output.`;
 }
 
 const MAX_ITERATIONS = 30;

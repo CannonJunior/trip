@@ -56,11 +56,11 @@ If no date is given, the agent defaults to two weeks from today with a 3-day sta
 ## URL templates used (stable, documented)
 
 ```
-FLIGHTS (Kayak):
-  https://www.kayak.com/flights/[ORIGIN]-[DEST]/[YYYY-MM-DD]
+FLIGHTS (Kayak, round-trip):
+  https://www.kayak.com/flights/[ORIGIN]-[DEST]/[DEPART_DATE]/[RETURN_DATE]
 
-FLIGHTS (Google):
-  https://www.google.com/travel/flights?q=flights+from+[ORIGIN]+to+[DEST]+on+[DATE]
+FLIGHTS (Google, round-trip):
+  https://www.google.com/travel/flights?q=round+trip+flights+from+[ORIGIN]+to+[DEST]+departing+[DATE_WORDS]+returning+[DATE_WORDS]
 
 HOTELS (Booking.com):
   https://www.booking.com/searchresults.html?checkin=[DATE]&checkout=[DATE]&ss=[CITY+ENCODED]&group_adults=2&no_rooms=1
