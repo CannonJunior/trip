@@ -321,7 +321,7 @@ export async function generateTrip(
     const response = await client.messages.create({
       model,
       max_tokens: 4096,
-      system: SYSTEM_PROMPT,
+      system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
       tools: TOOLS,
       messages: history,
     });
